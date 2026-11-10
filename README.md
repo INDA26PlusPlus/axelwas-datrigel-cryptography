@@ -25,6 +25,7 @@ to upload data do this:
 PUT <resource-name>
 signature: <sign>
 length: <length-in-bytes>
+nonce: <nonce>
 
 [data]
 
