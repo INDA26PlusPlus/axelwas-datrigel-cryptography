@@ -24,7 +24,6 @@ to upload data do this:
 ```
 PUT <resource-name>
 signature: <sign>
-hash: <hash>
 length: <length-in-bytes>
 
 [data]
