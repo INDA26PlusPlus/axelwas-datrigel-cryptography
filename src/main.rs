@@ -76,7 +76,7 @@ struct Message {
     data: Vec<u8>
 }
 
-fn read_to_end_message(mut stream: TcpStream) -> Message {
+fn read_to_end_message(stream: &mut TcpStream) -> Message {
     
     let mut lines = vec![];
     let mut line = String::new();
@@ -122,6 +122,7 @@ fn read_to_end_message(mut stream: TcpStream) -> Message {
 fn client_download(info: ClientInfo, mut stream: TcpStream) {
     stream.write(format!("GET {}\n\n", info.file).as_bytes()).unwrap();
 
+    let msg = read_to_end_message(&mut stream);
     // read to end func
 }
 
