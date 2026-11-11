@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env::args, fs::File, io::{self, Read, Write}, iter::Skip, net::{TcpListener, TcpStream}};
 
 use base64::prelude::*;
-use ring::{aead::{AES_256_GCM, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence, SealingKey, UnboundKey}, rand::{SecureRandom, SystemRandom}, signature::Ed25519KeyPair};
+use ring::{aead::{AES_256_GCM, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence, SealingKey, UnboundKey}, signature::UnparsedPublicKey, rand::{SecureRandom, SystemRandom}, signature::{ED25519, Ed25519KeyPair, KeyPair}};
 
 use crate::nonce::OneTimeNonce;
 
@@ -13,6 +13,14 @@ fn sign_file(mut file: std::fs::File, name: &str, keypair: Ed25519KeyPair) -> Ve
     file.read_to_end(&mut file_bytes).unwrap();
     let sign = keypair.sign(&file_bytes);
     Vec::from(sign.as_ref())   
+}
+
+fn verify_sign(mut file: Vec<u8>, name: &str, sign: &[u8], keypair: Ed25519KeyPair) -> bool {
+    let public_key = keypair.public_key();
+    let peer_public_key = UnparsedPublicKey::new(&ED25519, public_key.as_ref());
+
+    file.extend(name.as_bytes());
+    peer_public_key.verify(&file, &sign).is_ok()
 }
 
 fn keypair_from_pass(pass: &str) -> Ed25519KeyPair {
@@ -47,10 +55,18 @@ fn encrypt_file<T: NonceSequence>(mut f: File, key: UnboundKey, nonce: T) -> Vec
     let mut sealing_key = ring::aead::SealingKey::new(key, nonce);
     
     let mut in_out = vec![];
-    f.read_to_end(&mut in_out);
+    f.read_to_end(&mut in_out).unwrap();
     sealing_key.seal_in_place_append_tag(Aad::empty(), &mut in_out).unwrap();
 
     in_out
+}
+
+fn decrypt_file<T: NonceSequence>(mut bytes: Vec<u8>, key: UnboundKey, nonce: T) -> Vec<u8> {
+    let mut opening_key = ring::aead::OpeningKey::new(key, nonce);
+
+    opening_key.open_in_place(Aad::empty(), &mut bytes).unwrap();
+
+    bytes
 }
 
 fn client_upload(info: ClientInfo, mut stream: TcpStream) {
@@ -121,9 +137,28 @@ fn read_to_end_message(stream: &mut TcpStream) -> Message {
 
 fn client_download(info: ClientInfo, mut stream: TcpStream) {
     stream.write(format!("GET {}\n\n", info.file).as_bytes()).unwrap();
-
     let msg = read_to_end_message(&mut stream);
-    // read to end func
+
+    let nonce_vec = BASE64_STANDARD.decode(msg.headers.get("nonce").unwrap()).unwrap();
+    let nonce = [nonce_vec[0], nonce_vec[1], nonce_vec[2], nonce_vec[3], nonce_vec[4], nonce_vec[5], nonce_vec[6], nonce_vec[7], nonce_vec[8], nonce_vec[9], nonce_vec[10], nonce_vec[11]];
+    let signature = msg.headers.get("signature").unwrap();
+    let signature = BASE64_STANDARD.decode(signature).unwrap();
+    let keypair = keypair_from_pass(&info.password);
+    let mut decrypted = decrypt_file(msg.data, aeskey_from_pass(&info.password), nonce::OneTimeNonce::new(nonce));
+
+    
+    
+    let is_real = verify_sign(decrypted.clone(), &info.file, &signature, keypair);
+
+    if !is_real {
+        println!("signature not valid");
+        return;
+    }
+
+    let mut file = std::fs::File::create_new(&info.file).unwrap();
+    file.write_all(&mut decrypted).unwrap();
+    file.flush().unwrap();
+    drop(file);
 }
 
 
