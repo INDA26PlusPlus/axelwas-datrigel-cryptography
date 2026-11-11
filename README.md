@@ -4,6 +4,8 @@
 
 The server needs to save the signature, the nonce, the name, and the data.
 
+All letters in protocoll must be ascii.
+
 To get file do this:
 ```
 GET <resource-name>
@@ -19,6 +21,20 @@ length: <length-in-bytes>
 nonce: <nonce>
 
 [data]
+
+```
+
+Client can also demand a list of all files. This is so you can generate a merkle tree.
+```
+LIST
+
+```
+
+The server responds:
+```
+<filename1>
+<filename2>
+<filename3>
 
 ```
 

@@ -1,4 +1,4 @@
-use std::{env::args, fs::File, io::{self, Read, Write}, iter::Skip, net::{TcpListener, TcpStream}};
+use std::{collections::HashMap, env::args, fs::File, io::{self, Read, Write}, iter::Skip, net::{TcpListener, TcpStream}};
 
 use base64::prelude::*;
 use ring::{aead::{AES_256_GCM, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence, SealingKey, UnboundKey}, rand::{SecureRandom, SystemRandom}, signature::Ed25519KeyPair};
@@ -7,8 +7,9 @@ use crate::nonce::OneTimeNonce;
 
 mod nonce;
 
-fn sign_file(mut file: std::fs::File, keypair: Ed25519KeyPair) -> Vec<u8> {
+fn sign_file(mut file: std::fs::File, name: &str, keypair: Ed25519KeyPair) -> Vec<u8> {
     let mut file_bytes= vec![];
+    file_bytes.extend(name.bytes());
     file.read_to_end(&mut file_bytes).unwrap();
     let sign = keypair.sign(&file_bytes);
     Vec::from(sign.as_ref())   
@@ -52,14 +53,16 @@ fn encrypt_file<T: NonceSequence>(mut f: File, key: UnboundKey, nonce: T) -> Vec
     in_out
 }
 
-fn client_upload(info: ClientInfoUpload, mut stream: TcpStream) {
-    let path = filename::file_name(&info.file).unwrap();
+fn client_upload(info: ClientInfo, mut stream: TcpStream) {
+    let file = std::fs::File::open(&info.file).unwrap();
+
+    let path = filename::file_name(&file).unwrap();
     let name = format!("{}", path.file_name().unwrap().display());
     let keypair = keypair_from_pass(&info.password);
-    let signtaure = BASE64_STANDARD.encode(&sign_file(info.file.try_clone().unwrap(), keypair));
+    let signtaure = BASE64_STANDARD.encode(&sign_file(file.try_clone().unwrap(), &info.file, keypair));
     let nonce = generate_nonce();
 
-    let bytes = encrypt_file(info.file, aeskey_from_pass(&info.password), nonce.1); 
+    let bytes = encrypt_file(file, aeskey_from_pass(&info.password), nonce.1); 
     
     let mut to_send: Vec<u8> = vec![];
     to_send.extend(format!("PUT {}\nsignature: {}\nlength: {}\n\n", name, signtaure, bytes.len()).as_bytes());
@@ -68,12 +71,69 @@ fn client_upload(info: ClientInfoUpload, mut stream: TcpStream) {
     stream.write(&to_send).unwrap();
 }
 
+struct Message {
+    headers: HashMap<String, String>,
+    data: Vec<u8>
+}
+
+fn read_to_end_message(mut stream: TcpStream) -> Message {
+    
+    let mut lines = vec![];
+    let mut line = String::new();
+    let mut buff = [0];
+    loop {
+        stream.read(&mut buff).unwrap();
+        let c = char::from(buff[0]);
+        if c != '\n' {
+            line.push(c);
+            continue;
+        } else {
+            if line == "" {
+                break;
+            }
+            lines.push(line);
+            line = String::new();
+        }
+    }
+
+    let mut hashmap = HashMap::new();
+    for line in lines {
+        let mut split = line.split(": ");
+        let key = split.next().unwrap();
+        let value = split.next().unwrap();
+
+        hashmap.insert(String::from(key), String::from(value));
+    }
+
+    let length = hashmap.get("length").map(|s| s.parse::<usize>());
+    let length = length.unwrap().unwrap();
+
+    let mut buff = Vec::new();
+    for _ in 0..length { buff.push(0); }
+
+    stream.read_exact(&mut buff).unwrap();
+
+    Message {
+        headers: hashmap,
+        data: buff
+    }
+}
+
+fn client_download(info: ClientInfo, mut stream: TcpStream) {
+    stream.write(format!("GET {}\n\n", info.file).as_bytes()).unwrap();
+
+    // read to end func
+}
+
+
+
 fn main() {
     let connection = parse_arguments().unwrap();
 
     match connection.mode {
         Mode::Server => todo!(),
-        Mode::Client(i) => client_upload(i, connection.stream),
+        Mode::ClientUpload(i) => client_upload(i, connection.stream),
+        Mode::ClientDownload(i) => client_download(i, connection.stream),
     }
 
     println!("Hello, world!");
@@ -84,17 +144,19 @@ struct ConnectionType {
     mode: Mode
 }
 
-struct ClientInfoUpload {
+// The file on upload is the name of the LocalFile and 
+struct ClientInfo {
     password: String,
-    file: std::fs::File,
+    file: String,
 }
 
 enum Mode {
     Server,
-    Client(ClientInfoUpload)
+    ClientUpload(ClientInfo),
+    ClientDownload(ClientInfo)
 }
 
-fn parse_client_arguments() -> Option<ClientInfoUpload> {
+fn parse_client_arguments() -> Option<ClientInfo> {
     let mut args = std::env::args();    
 
     let mut pass = None;
@@ -106,13 +168,13 @@ fn parse_client_arguments() -> Option<ClientInfoUpload> {
         };
         match arg.as_str() {
             "-p" => pass = Some(args.next()?),
-            "-f" => file = Some(std::fs::File::open(args.next()?).unwrap()),
+            "-f" => file = Some(args.next()?),
             _ => continue,
         };
     }
 
     match (pass, file) {
-        (Some(p), Some(f)) => Some(ClientInfoUpload {password: p, file: f}),
+        (Some(p), Some(f)) => Some(ClientInfo {password: p, file: f}),
         _ => None
     }
 }
@@ -125,7 +187,8 @@ fn parse_arguments() -> Option<ConnectionType> { // std::env::args()
     let first_arg = dbg!(args.next()?);
 
     let (mode, stream) = match first_arg.as_str() {
-        "-a" => (Mode::Client(parse_client_arguments()?), parse_address(&args.next()?)),
+        "-a" => (Mode::ClientUpload(parse_client_arguments()?), parse_address(&args.next()?)),
+        "-d" => (Mode::ClientDownload(parse_client_arguments()?), parse_address(&args.next()?)),
         "-S" => (Mode::Server, wait_for_connection()),
         _ => return None
     };
