@@ -81,7 +81,7 @@ fn client_upload(info: ClientInfo, mut stream: TcpStream) {
     let bytes = encrypt_file(file, aeskey_from_pass(&info.password), nonce.1); 
     
     let mut to_send: Vec<u8> = vec![];
-    to_send.extend(format!("PUT {}\nsignature: {}\nlength: {}\n\n", name, signtaure, bytes.len()).as_bytes());
+    to_send.extend(format!("PUT {}\nsignature: {}\nnonce: {}\nlength: {}\n\n", name, signtaure, nonce.0, bytes.len()).as_bytes());
     to_send.extend(bytes);
 
     stream.write(&to_send).unwrap();
