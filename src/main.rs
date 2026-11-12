@@ -9,8 +9,8 @@ mod nonce;
 
 fn sign_file(mut file: std::fs::File, name: &str, keypair: Ed25519KeyPair) -> Vec<u8> {
     let mut file_bytes= vec![];
-    file_bytes.extend(name.bytes());
     file.read_to_end(&mut file_bytes).unwrap();
+    file_bytes.extend(name.bytes());
     let sign = keypair.sign(&file_bytes);
     Vec::from(sign.as_ref())   
 }
@@ -20,6 +20,8 @@ fn verify_sign(mut file: Vec<u8>, name: &str, sign: &[u8], keypair: Ed25519KeyPa
     let peer_public_key = UnparsedPublicKey::new(&ED25519, public_key.as_ref());
 
     file.extend(name.as_bytes());
+
+    println!("{:?}", &file);
     peer_public_key.verify(&file, &sign).is_ok()
 }
 
@@ -29,6 +31,14 @@ fn keypair_from_pass(pass: &str) -> Ed25519KeyPair {
     let digest = ctx.finish();
     let res = ring::signature::Ed25519KeyPair::from_seed_unchecked(digest.as_ref()).unwrap();
     res
+}
+
+fn hash_bytes(bytes: Vec<u8>) -> Vec<u8> {
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    ctx.update(&bytes);
+    let digest = ctx.finish();
+
+    Vec::from(digest.as_ref())
 }
 
 fn aeskey_from_pass(pass: &str) -> UnboundKey {
@@ -51,11 +61,16 @@ fn generate_nonce() -> (String, OneTimeNonce) {
     (BASE64_STANDARD.encode(ret), nonce::OneTimeNonce::new(ret))
 }
 
-fn encrypt_file<T: NonceSequence>(mut f: File, key: UnboundKey, nonce: T) -> Vec<u8> {
+fn encrypt_file<T: NonceSequence>(filename: &str, key: UnboundKey, nonce: T) -> Vec<u8> {
+    let mut f = std::fs::File::open(filename).unwrap();
+    
     let mut sealing_key = ring::aead::SealingKey::new(key, nonce);
     
-    let mut in_out = vec![];
+    let mut in_out = Vec::new();
     f.read_to_end(&mut in_out).unwrap();
+
+    dbg!(&in_out);
+
     sealing_key.seal_in_place_append_tag(Aad::empty(), &mut in_out).unwrap();
 
     in_out
@@ -72,13 +87,13 @@ fn decrypt_file<T: NonceSequence>(mut bytes: Vec<u8>, key: UnboundKey, nonce: T)
 fn client_upload(info: ClientInfo, mut stream: TcpStream) {
     let file = std::fs::File::open(&info.file).unwrap();
 
-    let path = filename::file_name(&file).unwrap();
+    let path = filename::file_name(&file.try_clone().unwrap()).unwrap();
     let name = format!("{}", path.file_name().unwrap().display());
     let keypair = keypair_from_pass(&info.password);
     let signtaure = BASE64_STANDARD.encode(&sign_file(file.try_clone().unwrap(), &info.file, keypair));
     let nonce = generate_nonce();
 
-    let bytes = encrypt_file(file, aeskey_from_pass(&info.password), nonce.1); 
+    let bytes = encrypt_file(&info.file, aeskey_from_pass(&info.password), nonce.1); 
     
     let mut to_send: Vec<u8> = vec![];
     to_send.extend(format!("PUT {}\nsignature: {}\nnonce: {}\nlength: {}\n\n", name, signtaure, nonce.0, bytes.len()).as_bytes());
@@ -135,7 +150,7 @@ fn read_to_end_message(stream: &mut TcpStream) -> Message {
     }
 }
 
-fn client_download(info: ClientInfo, mut stream: TcpStream) {
+fn client_download_get_file(info: &ClientInfo, mut stream: TcpStream) -> Vec<u8> {
     stream.write(format!("GET {}\n\n", info.file).as_bytes()).unwrap();
     let msg = read_to_end_message(&mut stream);
 
@@ -144,24 +159,69 @@ fn client_download(info: ClientInfo, mut stream: TcpStream) {
     let signature = msg.headers.get("signature").unwrap();
     let signature = BASE64_STANDARD.decode(signature).unwrap();
     let keypair = keypair_from_pass(&info.password);
-    let mut decrypted = decrypt_file(msg.data, aeskey_from_pass(&info.password), nonce::OneTimeNonce::new(nonce));
+    let decrypted = decrypt_file(msg.data, aeskey_from_pass(&info.password), nonce::OneTimeNonce::new(nonce));
+    let s = &decrypted[0..decrypted.len() - 16];
 
+    println!("{:?}", s);
     
-    
-    let is_real = verify_sign(decrypted.clone(), &info.file, &signature, keypair);
+    let is_real = verify_sign(Vec::from(s), &info.file, &signature, keypair);
 
     if !is_real {
         println!("signature not valid");
-        return;
+        panic!("sign not valid");
     }
 
+    return Vec::from(s);
+}
+
+fn client_download(info: ClientInfo, stream: TcpStream) {
+    let mut to_write = client_download_get_file(&info, stream);
+
     let mut file = std::fs::File::create_new(&info.file).unwrap();
-    file.write_all(&mut decrypted).unwrap();
+    file.write_all(&mut to_write).unwrap();
     file.flush().unwrap();
     drop(file);
 }
 
+fn read_list(stream: &mut TcpStream) -> Vec<String> {
+    let mut b = [0];
+    let mut s = String::new();
 
+    loop {
+        stream.read_exact(&mut b).unwrap();
+
+        s.push(char::from(b[0]));
+
+        if s.ends_with("\n\n") {
+            break;
+        }
+    }
+
+    let ret: Vec<&str> = s.split("\n").collect();
+
+    ret.into_iter().filter(|p| *p != "").map(|s| String::from(s)).collect()
+}
+
+fn client_merkle_tree(info: ClientInfo, mut stream: TcpStream) {
+    stream.write(b"LIST\n\n").unwrap();
+    let mut files = read_list(&mut stream);
+    files.sort();
+
+    let mut hashes = vec![];
+    for file in files {
+        let res = client_download_get_file(&ClientInfo { password: info.password.clone(), file }, stream.try_clone().unwrap());
+        hashes.extend(hash_bytes(res));
+
+    }
+
+    let final_hash = BASE64_STANDARD.encode(hash_bytes(hashes));
+
+    let mut to_write = std::fs::File::create(info.file).unwrap();
+
+    to_write.write(format!("merkleTreeHash: {}", final_hash).as_bytes()).unwrap();
+    println!("merkleTreeHash: {}", final_hash);
+
+}
 
 fn main() {
     let mut connection = parse_arguments().unwrap();
@@ -170,6 +230,7 @@ fn main() {
         Mode::Server(mut memory, listner) => {loop {connection_mode_server(&mut memory, connection.stream); (connection.stream, _) = listner.accept().unwrap()}},
         Mode::ClientUpload(i) => client_upload(i, connection.stream),
         Mode::ClientDownload(i) => client_download(i, connection.stream),
+        Mode::ClientMerkleTree(i) => client_merkle_tree(i, connection.stream),
     }
 
     println!("Hello, world!");
@@ -189,7 +250,8 @@ struct ClientInfo {
 enum Mode {
     Server(HashMap<String, Vec<u8>>, TcpListener),
     ClientUpload(ClientInfo),
-    ClientDownload(ClientInfo)
+    ClientDownload(ClientInfo),
+    ClientMerkleTree(ClientInfo)
 }
 
 fn parse_client_arguments() -> Option<ClientInfo> {
@@ -225,6 +287,7 @@ fn parse_arguments() -> Option<ConnectionType> { // std::env::args()
     let (mode, stream) = match first_arg.as_str() {
         "-a" => (Mode::ClientUpload(parse_client_arguments()?), parse_address(&args.next()?)),
         "-d" => (Mode::ClientDownload(parse_client_arguments()?), parse_address(&args.next()?)),
+        "-m" => (Mode::ClientMerkleTree(parse_client_arguments()?), parse_address(&args.next()?)),
         "-S" => { let (stream, listner) = wait_for_connection(); (Mode::Server(memory_init(), listner), stream)},
         _ => return None
     };
