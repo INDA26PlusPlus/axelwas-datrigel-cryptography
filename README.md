@@ -93,4 +93,4 @@ Server responds
 
 ```
 OK
-``` EX bytes
+```

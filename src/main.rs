@@ -202,13 +202,14 @@ fn read_list(stream: &mut TcpStream) -> Vec<String> {
     ret.into_iter().filter(|p| *p != "").map(|s| String::from(s)).collect()
 }
 
-fn client_merkle_tree(info: ClientInfo, mut stream: TcpStream) {
+fn client_merkle_tree(info: ClientInfo, address: &str, mut stream: TcpStream) {
     stream.write(b"LIST\n\n").unwrap();
     let mut files = read_list(&mut stream);
     files.sort();
 
     let mut hashes = vec![];
     for file in files {
+        stream = TcpStream::connect(address).unwrap();
         let res = client_download_get_file(&ClientInfo { password: info.password.clone(), file }, stream.try_clone().unwrap());
         hashes.extend(hash_bytes(res));
 
@@ -230,7 +231,7 @@ fn main() {
         Mode::Server(mut memory, listner) => {loop {connection_mode_server(&mut memory, connection.stream); (connection.stream, _) = listner.accept().unwrap()}},
         Mode::ClientUpload(i) => client_upload(i, connection.stream),
         Mode::ClientDownload(i) => client_download(i, connection.stream),
-        Mode::ClientMerkleTree(i) => client_merkle_tree(i, connection.stream),
+        Mode::ClientMerkleTree(i) => client_merkle_tree(i, &connection.address, connection.stream),
     }
 
     println!("Hello, world!");
@@ -238,6 +239,7 @@ fn main() {
 
 struct ConnectionType {
     stream: TcpStream,
+    address: String,
     mode: Mode
 }
 
@@ -284,23 +286,24 @@ fn parse_arguments() -> Option<ConnectionType> { // std::env::args()
     args.next();
     let first_arg = dbg!(args.next()?);
 
-    let (mode, stream) = match first_arg.as_str() {
+    let (mode, (stream, add)) = match first_arg.as_str() {
         "-a" => (Mode::ClientUpload(parse_client_arguments()?), parse_address(&args.next()?)),
         "-d" => (Mode::ClientDownload(parse_client_arguments()?), parse_address(&args.next()?)),
         "-m" => (Mode::ClientMerkleTree(parse_client_arguments()?), parse_address(&args.next()?)),
-        "-S" => { let (stream, listner) = wait_for_connection(); (Mode::Server(memory_init(), listner), stream)},
+        "-S" => { let (stream, listner) = wait_for_connection(); (Mode::Server(memory_init(), listner), (stream, String::new()))},
         _ => return None
     };
 
     return Some(ConnectionType {
         mode,
-        stream
+        stream,
+        address: add
     });
 }
 
 // Establishes a tcp stream to server.
-fn parse_address(address: &str) -> TcpStream {
-    TcpStream::connect(address.trim()).expect("Could not connect")
+fn parse_address(address: &str) -> (TcpStream, String) {
+    (TcpStream::connect(address.trim()).expect("Could not connect"), String::from(address))
 }
 
 fn wait_for_connection() -> (TcpStream, TcpListener) {
@@ -364,7 +367,7 @@ fn list_all_files(memory: &mut HashMap<String, Vec<u8>>, stream: &mut TcpStream)
     for keys in memory.keys() {
         buff.push_str(&format!("{keys}\n"));
     }
-
+    buff.push('\n');
     buff.as_bytes().to_vec()
 }
 
