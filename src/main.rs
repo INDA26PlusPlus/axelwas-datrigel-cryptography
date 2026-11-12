@@ -385,7 +385,12 @@ fn server_read_firstline(mut stream: &mut TcpStream) -> (Command, String) {
         } else {
             let mut split = line.split(' ');
             command_str = split.next().unwrap();
-            file_name = split.next().unwrap().to_owned();
+            let temp =  split.next();
+
+            file_name = match temp {
+                None => "".to_owned(),
+                _ => temp.unwrap().to_owned(),
+            };
 
             break;
         }
