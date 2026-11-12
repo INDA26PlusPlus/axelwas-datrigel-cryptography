@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::args, fs::File, io::{self, Read, Write}, iter::Skip, net::{TcpListener, TcpStream}};
+use std::{collections::HashMap, env::args, fs::File, hash::Hash, io::{self, Read, Write}, iter::Skip, net::{TcpListener, TcpStream}, str::Bytes};
 
 use base64::prelude::*;
 use ring::{aead::{AES_256_GCM, Aad, BoundKey, NONCE_LEN, Nonce, NonceSequence, SealingKey, UnboundKey}, signature::UnparsedPublicKey, rand::{SecureRandom, SystemRandom}, signature::{ED25519, Ed25519KeyPair, KeyPair}};
@@ -164,10 +164,10 @@ fn client_download(info: ClientInfo, mut stream: TcpStream) {
 
 
 fn main() {
-    let connection = parse_arguments().unwrap();
+    let mut connection = parse_arguments().unwrap();
 
     match connection.mode {
-        Mode::Server => todo!(),
+        Mode::Server(mut memory, listner) => {loop {connection_mode_server(&mut memory, connection.stream); (connection.stream, _) = listner.accept().unwrap()}},
         Mode::ClientUpload(i) => client_upload(i, connection.stream),
         Mode::ClientDownload(i) => client_download(i, connection.stream),
     }
@@ -187,7 +187,7 @@ struct ClientInfo {
 }
 
 enum Mode {
-    Server,
+    Server(HashMap<String, Vec<u8>>, TcpListener),
     ClientUpload(ClientInfo),
     ClientDownload(ClientInfo)
 }
@@ -225,7 +225,7 @@ fn parse_arguments() -> Option<ConnectionType> { // std::env::args()
     let (mode, stream) = match first_arg.as_str() {
         "-a" => (Mode::ClientUpload(parse_client_arguments()?), parse_address(&args.next()?)),
         "-d" => (Mode::ClientDownload(parse_client_arguments()?), parse_address(&args.next()?)),
-        "-S" => (Mode::Server, wait_for_connection()),
+        "-S" => { let (stream, listner) = wait_for_connection(); (Mode::Server(memory_init(), listner), stream)},
         _ => return None
     };
 
@@ -240,7 +240,100 @@ fn parse_address(address: &str) -> TcpStream {
     TcpStream::connect(address.trim()).expect("Could not connect")
 }
 
-fn wait_for_connection() -> TcpStream {
-    let conn = TcpListener::bind("0.0.0.0:6767").unwrap().incoming().next().unwrap();
-    conn.unwrap()
+fn wait_for_connection() -> (TcpStream, TcpListener) {
+    let listner = TcpListener::bind("0.0.0.0:6767").unwrap();
+    let conn = listner.incoming().next().unwrap();
+    (conn.unwrap(), listner)
+}
+
+enum Command {
+    GET,
+    PUT,
+    LIST,
+}
+
+//Creates a empty hashmap.
+fn memory_init() -> HashMap<String, Vec<u8>> {
+    let mut hashmap: HashMap<String, Vec<u8>> = HashMap::new();
+    hashmap
+}
+
+// Server setup and execution
+fn connection_mode_server(memory: &mut HashMap<String, Vec<u8>>, mut stream: TcpStream) {
+    let (command, file_name) = server_read_firstline(&mut stream);
+
+    let response = match command {
+        Command::GET => fetch_file_contents(file_name, memory, &mut stream),
+        Command::PUT => put_file_contents(file_name, memory, &mut stream),
+        Command::LIST => list_all_files(memory, &mut stream),
+    };
+    
+    stream.write(&response);
+}
+
+// Store a file in memory, with all headers -> returns a message as one block.
+fn put_file_contents(file_name: String, memory: &mut HashMap<String, Vec<u8>>, stream: &mut TcpStream) -> Vec<u8> {
+    let message = read_to_end_message(stream);
+
+    let sig = message.headers.get("signature").unwrap();
+    let length = message.headers.get("length").unwrap();
+    let nonce = message.headers.get("nonce").unwrap();
+
+    let mut headers = format!("signature: {sig}\nlength: {length}\nnonce: {nonce}\n").as_bytes().to_vec();
+    headers.extend(message.data);
+
+    memory.insert(file_name, headers);
+
+    "OK".as_bytes().to_vec()
+}
+
+// Fetch file from memory
+fn fetch_file_contents(file_name: String, memory: &mut HashMap<String, Vec<u8>>, stream: &mut TcpStream) -> Vec<u8> {
+    let message = memory.get(&file_name).unwrap().clone();
+    
+    message
+}
+
+// Lists all files in server memory
+fn list_all_files(memory: &mut HashMap<String, Vec<u8>>, stream: &mut TcpStream) -> Vec<u8> {
+    let mut buff = String::new();
+    
+    for keys in memory.keys() {
+        buff.push_str(&format!("{keys}\n"));
+    }
+
+    buff.as_bytes().to_vec()
+}
+
+// reads first line for parsing GET, PUT, LIST.
+fn server_read_firstline(mut stream: &mut TcpStream) -> (Command, String) {
+    let mut line = String::new();
+    let mut buff = [0];
+
+    let mut command_str: &str; 
+    let mut file_name: String;
+
+    loop {
+        stream.read(&mut buff).unwrap();
+        let c = char::from(buff[0]);
+        if  c != '\n' {
+            line.push(c);
+            continue;
+        } else {
+            let mut split = line.split(' ');
+            command_str = split.next().unwrap();
+            file_name = split.next().unwrap().to_owned();
+
+            break;
+        }
+    }
+
+    let command = match command_str {
+        "GET" => Command::GET,
+        "PUT" => Command::PUT,
+        "LIST" => Command::LIST,
+        _ => panic!("Invalid recived invalid client command")
+    };
+    
+    return (command, file_name)
 }
