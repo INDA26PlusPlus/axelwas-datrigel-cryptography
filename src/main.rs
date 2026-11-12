@@ -279,7 +279,7 @@ fn put_file_contents(file_name: String, memory: &mut HashMap<String, Vec<u8>>, s
     let length = message.headers.get("length").unwrap();
     let nonce = message.headers.get("nonce").unwrap();
 
-    let mut headers = format!("signature: {sig}\nlength: {length}\nnonce: {nonce}\n").as_bytes().to_vec();
+    let mut headers = format!("signature: {sig}\nlength: {length}\nnonce: {nonce}\n\n").as_bytes().to_vec();
     headers.extend(message.data);
 
     memory.insert(file_name, headers);
